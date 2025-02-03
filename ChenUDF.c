@@ -1,3 +1,4 @@
+
 #include "udf.h"
 /* Constants for material properties */
 #define LAMBDA_L 0.665 /* Thermal conductivity of liquid (W/m.K) */
@@ -33,17 +34,19 @@ DEFINE_SOURCE(vapor_src, cell, pri_th, dS, eqn)
     real alpha_v = C_VOF(cell, pri_th); /* Volume fraction of vapor */
     real alpha_l = C_VOF(cell, sec_th); /* Volume fraction of liquid */
     
-
+    real p_op = RP_Get_Real("operating-pressure");
     /* Get temperature */
     real T_cell = C_T(cell, mix_th);
     real time = CURRENT_TIME;
+    
     if (T_cell > T_SAT)
     {
+       
 
         /* Calculate Nucleation Density */
         //real P = C_P(cell, mix_th) / 1e6;
-        real P = C_P(cell, mix_th); /* Convert pressure to MPa */
-        real delta_Tsup = T_cell - T0;    /* Superheat relative to reference */
+        real P = (C_P(cell, mix_th)+p_op)/1e6; /* Convert pressure to MPa */
+        real delta_Tsup = T_cell - T_SAT;    /* Superheat relative to reference */
         real f_P = 26.006 - 3.678 * exp(-2 * P) - 21.907 * exp(-P / 24.065);
         real A = A_CONST * P * P + 0.0108 * P + 0.0119;
         real B = B_CONST * P + 1.988;
@@ -51,14 +54,14 @@ DEFINE_SOURCE(vapor_src, cell, pri_th, dS, eqn)
         real Nw = N0 * cos_theta * exp(f_P) * pow(delta_Tsup, delta_Tsup * A + B);
         
         /* Compute volume fraction gradient using nucleation density */
-        real grad_alpha_v = (Nw * 1e-6) / (C_M * RHO_L); /* 1e-6 scaling for proper unit conversion */
+        real grad_alpha_v = (Nw*1)/ (C_M * RHO_L); /* 1 scaling for proper unit conversion */
         
         // printing some vars 
-        Message(" L VOF : %g ------- V VOF : %g \n",alpha_l,alpha_v);
-        Message(" Cell Temperature : %g \n",T_cell);
-        Message(" Cell Pressure : %g \n",P);
-        Message(" NW : %g \n",Nw);
-        Message(" DOT Product term : %g \n",grad_alpha_v);
+        // Message(" L VOF : %g ------- V VOF : %g \n",alpha_l,alpha_v);
+        // Message(" Cell Temperature : %g \n",T_cell);
+        // Message(" Cell Pressure : %g \n",P);
+        // Message(" NW : %g \n",Nw);
+        // Message(" DOT Product term : %g \n",grad_alpha_v);
         // -------------------------------------------------//
 
         
@@ -67,8 +70,11 @@ DEFINE_SOURCE(vapor_src, cell, pri_th, dS, eqn)
         /* Compute volumetric mass source */
         m_dot = ((alpha_v * LAMBDA_V + alpha_l * LAMBDA_L) * grad_alpha_v) / HFG;
         //Message("mass transferd from Liquid to vapor in the current cell %g\n\n\n",m_dot);
-        Message(" mass transfered : %g \n",m_dot);
-
+        // if(m_dot>0){  
+        //     Message(" ------------mass transfered --------------: %g \n\n\n\n\n",m_dot);
+            
+            
+        // }
 
         dS[eqn] = 0; /* Explicit source */
     }
@@ -97,12 +103,13 @@ DEFINE_SOURCE(liq_src, cell, sec_th, dS, eqn)
     /* Get temperature */
     real T_cell = C_T(cell, mix_th);
     real time = CURRENT_TIME;
-    
+    real p_op = RP_Get_Real("operating-pressure");
+
     if (T_cell > T_SAT)
     {
         /* Calculate Nucleation Density */
-        real P = C_P(cell, mix_th) / 1e6; /* Convert pressure to MPa */
-        real delta_Tsup = T_cell - T0;    /* Superheat relative to reference */
+        real P = (C_P(cell, mix_th)+p_op)/1e6; /* Convert pressure to MPa */
+        real delta_Tsup = T_cell - T_SAT;    /* Superheat relative to reference */
         real f_P = 26.006 - 3.678 * exp(-2 * P) - 21.907 * exp(-P / 24.065);
         real A = A_CONST * P * P + 0.0108 * P + 0.0119;
         real B = B_CONST * P + 1.988;
@@ -110,7 +117,7 @@ DEFINE_SOURCE(liq_src, cell, sec_th, dS, eqn)
         real Nw = N0 * cos_theta * exp(f_P) * pow(delta_Tsup, delta_Tsup * A + B);
         
         /* Compute volume fraction gradient using nucleation density */
-        real grad_alpha_v = (Nw * 1e-6) / (C_M * RHO_L); /* 1e-6 scaling for proper unit conversion */
+        real grad_alpha_v = (Nw*1)/ (C_M * RHO_L); /* 1 scaling for proper unit conversion */
         
         /* Compute volumetric mass source */
         m_dot = -((alpha_v * LAMBDA_V + alpha_l * LAMBDA_L) * grad_alpha_v) / HFG;
@@ -136,11 +143,11 @@ DEFINE_SOURCE(enrg_src,cell,mix_th,ds,eqn)
     real T_cell = C_T(cell, mix_th);
     real alpha_v = C_VOF(cell,pri_th);
     real alpha_l = C_VOF(cell,sec_th);
-
+    real p_op = RP_Get_Real("operating-pressure");
     if( T_cell>T_SAT){
          /* Calculate Nucleation Density */
-        real P = C_P(cell, mix_th) / 1e6; /* Convert pressure to MPa */
-        real delta_Tsup = T_cell - T0;    /* Superheat relative to reference */
+        real P = (C_P(cell, mix_th)+p_op)/1e6; /* Convert pressure to MPa */
+        real delta_Tsup = T_cell - T_SAT;    /* Superheat relative to reference */
         real f_P = 26.006 - 3.678 * exp(-2 * P) - 21.907 * exp(-P / 24.065);
         real A = A_CONST * P * P + 0.0108 * P + 0.0119;
         real B = B_CONST * P + 1.988;
@@ -148,10 +155,10 @@ DEFINE_SOURCE(enrg_src,cell,mix_th,ds,eqn)
         real Nw = N0 * cos_theta * exp(f_P) * pow(delta_Tsup, delta_Tsup * A + B);
         
         /* Compute volume fraction gradient using nucleation density */
-        real grad_alpha_v = (Nw * 1e-6) / (C_M * RHO_L); /* 1e-6 scaling for proper unit conversion */
+        real grad_alpha_v = (Nw*1)/ (C_M * RHO_L); /* 1 scaling for proper unit conversion */
         
         /* Compute volumetric mass source */
-        m_dot = -((alpha_v * LAMBDA_V + alpha_l * LAMBDA_L) * grad_alpha_v) / HFG;
+        m_dot = ((alpha_v * LAMBDA_V + alpha_l * LAMBDA_L) * grad_alpha_v) / HFG;
         ds[eqn] = 0; /* Explicit source */
 
 
