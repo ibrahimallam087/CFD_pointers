@@ -1,191 +1,174 @@
+/* === Header Files === */
+/* These headers provide necessary macros and functions for Fluent UDFs */
+#include "udf.h"          // Standard Fluent UDF functions
+#include "sg.h"           // Species transport and mass transfer functions
+#include "sg_mphase.h"    // Multiphase flow functions (for VOF model)
+#include "flow.h"         // Flow-related data (velocity, pressure, etc.)
+#include "mem.h"          // Memory allocation functions
 
-#include "udf.h"
-/* Constants for material properties */
-#define LAMBDA_L 0.665 /* Thermal conductivity of liquid (W/m.K) */
-#define LAMBDA_V 0.025 /* Thermal conductivity of vapor (W/m.K) */
-#define HFG 2260000    /* Latent heat of vaporization (J/kg) */
-#define T_SAT 373.15   /* Saturation temperature (K) */
-#define PI_ 3.14159
-/* Nucleation site constants */
-#define N0 1000      /* Reference nucleation density (site/m2) */
-#define TCRIT 647.15 /* Critical temperature (K) */
-#define T0 298.15    /* Reference temperature (K) */
-#define GAMMA 0.719  /* Dimensionless constant */
-#define A_CONST -0.0002
-#define B_CONST 0.122
-
-/* Empirical parameters for nucleation */
-#define P_REFR 0.1 /* Reference pressure (MPa) */
-#define C_M 2.0    /* Empirical coefficient for mass transfer */
-#define RHO_L 997  /* Density of liquid water (kg/m^3) */
-
-/* User-defined function for mass source (evaporation) */
-static real total_mdot = 0;
-static real cell_count =0;
-
-// mass source term for vapor phase 
-DEFINE_SOURCE(vapor_src, cell, pri_th, dS, eqn)
+/* ==================================================================== */
+/* UDF: Compute interfacial area density (interaction between phases)   */
+/* This function runs once per iteration and computes the volume fraction */
+/* gradient and temperature gradient, then stores their product in UDM[0] */
+/* ==================================================================== */
+DEFINE_ADJUST(area_density, domain)
 {
-    Thread *mix_th, *sec_th;
-    real m_dot = 0.0;
+    /* === Variable Declarations === */
+    Thread *t;         // Represents a thread (fluid zone)
+    Thread **pt;       // Stores phase-specific threads
+    cell_t c;          // Represents a cell in the domain
+    Domain *pDomain = DOMAIN_SUB_DOMAIN(domain, P_PHASE);  // Get the primary phase domain
+    real voidx, voidy, voidz = 0;  // Stores gradient components
 
-    /* Thread assignments */
-    mix_th = THREAD_SUPER_THREAD(pri_th);
-    sec_th = THREAD_SUB_THREAD(mix_th, 1);
+    /* === Compute Volume Fraction Gradient === */
+    Alloc_Storage_Vars(pDomain, SV_VOF_RG, SV_VOF_G, SV_NULL); // Allocate memory for gradients
+    Scalar_Reconstruction(pDomain, SV_VOF, -1, SV_VOF_RG, NULL); // Compute reconstruction gradient
+    Scalar_Derivatives(pDomain, SV_VOF, -1, SV_VOF_G, SV_VOF_RG, Vof_Deriv_Accumulate); // Compute final gradient
 
-    real alpha_v = C_VOF(cell, pri_th); /* Volume fraction of vapor */
-    real alpha_l = C_VOF(cell, sec_th); /* Volume fraction of liquid */
-    
-    real p_op = RP_Get_Real("operating-pressure");
-    /* Get temperature */
-    real T_cell = C_T(cell, mix_th);
-    real time = CURRENT_TIME;
-    
-    if (T_cell > T_SAT)
+    /* === Compute Temperature Gradient === */
+    Alloc_Storage_Vars(domain, SV_T_RG, SV_T_G, SV_NULL);
+    T_derivatives(domain);  // Compute temperature gradient
+    Free_Storage_Vars(domain, SV_T_RG, SV_NULL);  // Free reconstruction gradients
+
+    /* === Loop Over Cells to Compute Interface Area Density === */
+    mp_thread_loop_c(t, domain, pt)
     {
-       
+        if (FLUID_THREAD_P(t))  // Ensure thread is a fluid region
+        {
+            Thread *tp = pt[P_PHASE];  // Get the primary phase thread
 
-        /* Calculate Nucleation Density */
-        //real P = C_P(cell, mix_th) / 1e6;
-        real P = (C_P(cell, mix_th)+p_op); /* Convert pressure to MPa */
-        real delta_Tsup = T_cell - T_SAT;    /* Superheat relative to reference */
-        real f_P = 26.006 - 3.678 * exp(-2 * P) - 21.907 * exp(-P / 24.065);
-        real A = A_CONST * P * P + 0.0108 * P + 0.0119;
-        real B = B_CONST * P + 1.988;
-        real cos_theta = (1 - cos(41.37 * PI_ / 180)) * pow((TCRIT - T_cell) / (TCRIT - T0), GAMMA);
-        real Nw = N0 * cos_theta * exp(f_P) * pow(delta_Tsup, delta_Tsup * A + B);
-        
-        /* Compute volume fraction gradient using nucleation density */
-        real grad_alpha_v = (Nw)/ (C_M * RHO_L); /* 10 scaling for proper unit conversion */
-        
-        // printing some vars 
-        // Message(" L VOF : %g ------- V VOF : %g \n",alpha_l,alpha_v);
-        // Message(" Cell Temperature : %g \n",T_cell);
-        // Message(" Cell Pressure : %g \n",P);
-        // Message(" NW : %g \n",Nw);
-        // Message(" DOT Product term : %g \n",grad_alpha_v);
-        // -------------------------------------------------//
+            begin_c_loop(c, t)  // Loop over all cells
+            {
+                /* Store the product of VOF gradient and temperature gradient in UDM[0] */
+#if RP_3D  
+                C_UDMI(c, t, 0) = (C_VOF_G(c, tp)[0] * C_T_G(c, t)[0] +
+                                  C_VOF_G(c, tp)[1] * C_T_G(c, t)[1] +
+                                  C_VOF_G(c, tp)[2] * C_T_G(c, t)[2]);
+#endif  
 
-        
-
-        
-        /* Compute volumetric mass source */
-        m_dot = ((alpha_v * LAMBDA_V + alpha_l * LAMBDA_L) * grad_alpha_v) / HFG;
-        total_mdot+=m_dot;
-        cell_count++;
-
-        //Message("mass transferd from Liquid to vapor in the current cell %g\n\n\n",m_dot);
-     
-        dS[eqn] = 0; /* Explicit source */
+#if RP_2D  
+                C_UDMI(c, t, 0) = (C_VOF_G(c, tp)[0] * C_T_G(c, t)[0] +
+                                  C_VOF_G(c, tp)[1] * C_T_G(c, t)[1]);
+#endif  
+            }
+            end_c_loop(c, t)
+        }
     }
-    else
-    {
-        m_dot = 0.0;
-        dS[eqn] = 0.0;
-    }
-    
-    return m_dot;
+
+    /* === Free Memory (UDM still retains values) === */
+    Free_Storage_Vars(pDomain, SV_VOF_RG, SV_VOF_G, SV_NULL);
+    Free_Storage_Vars(domain, SV_T_G, SV_NULL);
 }
 
-// mass source term for liquid phase 
-DEFINE_SOURCE(liq_src, cell, sec_th, dS, eqn)
+/* ==================================================================== */
+/* DEFINE_SOURCE: Computes Source Term for Gas Phase                    */
+/* This function is used in Fluent's governing equations                 */
+/* ==================================================================== */
+DEFINE_SOURCE(gas, cell, thread, dS, eqn)
 {
-    Thread *mix_th, *pri_th;
-    real m_dot = 0.0;
+    real source;
+    Thread *tm = THREAD_SUPER_THREAD(thread); // Get the mixture thread
+    Thread **pt = THREAD_SUB_THREADS(tm); // Get sub-threads (phases)
 
-    /* Thread assignments */
-    mix_th = THREAD_SUPER_THREAD(sec_th);
-    pri_th = THREAD_SUB_THREAD(mix_th, 0);
+    /* Compute phase conductivity weighted by volume fraction */
+    real Kl = C_K_L(cell, pt[1]) * C_VOF(cell, pt[1]);
+    real Kg = C_K_L(cell, pt[0]) * C_VOF(cell, pt[0]);
+    real L = 1e5;  // Characteristic length scale
 
-    real alpha_v = C_VOF(cell, pri_th); /* Volume fraction of vapor */
-    real alpha_l = C_VOF(cell, sec_th); /* Volume fraction of liquid */
+    /* Compute source term using stored UDM[0] value */
+    source = (Kl + Kg) * C_UDMI(cell, tm, 0) / L;
+    C_UDMI(cell, tm, 1) = source;  // Store in UDM[1]
+    C_UDMI(cell, tm, 2) = -source * L;  // Store in UDM[2]
 
-    /* Get temperature */
-    real T_cell = C_T(cell, mix_th);
-    real time = CURRENT_TIME;
-    real p_op = RP_Get_Real("operating-pressure");
+    dS[eqn] = 0;  // No derivative term
+    return source;
+}
 
-    if (T_cell > T_SAT)
-    {
-        /* Calculate Nucleation Density */
-        real P = (C_P(cell, mix_th)+p_op); /* Convert pressure to MPa */
-        real delta_Tsup = T_cell - T_SAT;    /* Superheat relative to reference */
-        real f_P = 26.006 - 3.678 * exp(-2 * P) - 21.907 * exp(-P / 24.065);
-        real A = A_CONST * P * P + 0.0108 * P + 0.0119;
-        real B = B_CONST * P + 1.988;
-        real cos_theta = (1 - cos(41.37 * PI_ / 180)) * pow((TCRIT - T_cell) / (TCRIT - T0), GAMMA);
-        real Nw = N0 * cos_theta * exp(f_P) * pow(delta_Tsup, delta_Tsup * A + B);
-        
-        /* Compute volume fraction gradient using nucleation density */
-        real grad_alpha_v = (Nw)/ (C_M * RHO_L); /* 1 scaling for proper unit conversion */
-        
-        /* Compute volumetric mass source */
-        m_dot = -((alpha_v * LAMBDA_V + alpha_l * LAMBDA_L) * grad_alpha_v) / HFG;
-        dS[eqn] = 0; /* Explicit source */
-   
-    }
-    else
-    {
-        m_dot = 0.0;
-        dS[eqn] = 0.0;
-    }
+/* ==================================================================== */
+/* DEFINE_SOURCE: Computes Source Term for Liquid Phase                 */
+/* ==================================================================== */
+DEFINE_SOURCE(liquid, cell, thread, dS, eqn)
+{
+    real source;
+    Thread *tm = THREAD_SUPER_THREAD(thread);
+
+    source = -C_UDMI(cell, tm, 1);  // Liquid source = - Gas source
+    dS[eqn] = 0;
     
-    return m_dot;
+    return source;
 }
 
-// Energy source term
-DEFINE_SOURCE(enrg_src,cell,mix_th,ds,eqn)
+/* ==================================================================== */
+/* DEFINE_SOURCE: Computes Source Term for Energy Equation              */
+/* ==================================================================== */
+DEFINE_SOURCE(energy, cell, thread, dS, eqn)
 {
-    Thread *pri_th,*sec_th;
-    real m_dot;
-    pri_th = THREAD_SUB_THREAD(mix_th,0);
-    sec_th = THREAD_SUB_THREAD(mix_th,1);
-    real time = CURRENT_TIME;
-    real T_cell = C_T(cell, mix_th);
-    real alpha_v = C_VOF(cell,pri_th);
-    real alpha_l = C_VOF(cell,sec_th);
-    real p_op = RP_Get_Real("operating-pressure");
-    if( T_cell>T_SAT){
-         /* Calculate Nucleation Density */
-        real P = (C_P(cell, mix_th)+p_op); /* Convert pressure to MPa */
-        real delta_Tsup = T_cell - T_SAT;    /* Superheat relative to reference */
-        real f_P = 26.006 - 3.678 * exp(-2 * P) - 21.907 * exp(-P / 24.065);
-        real A = A_CONST * P * P + 0.0108 * P + 0.0119;
-        real B = B_CONST * P + 1.988;
-        real cos_theta = (1 - cos(41.37 * PI_ / 180)) * pow((TCRIT - T_cell) / (TCRIT - T0), GAMMA);
-        real Nw = N0 * cos_theta * exp(f_P) * pow(delta_Tsup, delta_Tsup * A + B);
-        
-        /* Compute volume fraction gradient using nucleation density */
-        real grad_alpha_v = (Nw)/ (C_M * RHO_L); /* 1 scaling for proper unit conversion */
-        
-        /* Compute volumetric mass source */
-        m_dot = ((alpha_v * LAMBDA_V + alpha_l * LAMBDA_L) * grad_alpha_v) / HFG;
-        ds[eqn] = 0; /* Explicit source */
-       
+    real source;
+    Thread *tm = thread;
 
-
-    }
-    else{
-        ds[eqn] = 0;
-        m_dot = 0;
-    }
-    return HFG*m_dot;
-
-
+    source = C_UDMI(cell, tm, 2);  // Retrieve stored energy source term
+    dS[eqn] = 0;
+    
+    return source;
 }
-DEFINE_EXECUTE_AT_END(report_func){
-    if(cell_count>0)
-    {
-        real avg_mdot =  total_mdot/cell_count;
-        Message(" Average mass transferd to vapor is %d\n",avg_mdot);
-        Message(" cell count %d\n",cell_count);
-        cell_count = 0;
-        total_mdot = 0;
-        
-    }
-    else 
-    {
-        Message("Thers is no evaporation in this iteration \n");
 
+/* ==================================================================== */
+/* DEFINE_INIT: Initializes the Volume Fraction Field                   */
+/* Used to set initial phase distribution based on a wave function      */
+/* ==================================================================== */
+DEFINE_INIT(my_init_function, domain)
+{
+    Thread *t;
+    Thread **pt;
+    Thread **st;
+    cell_t c;
+    Domain *pDomain = DOMAIN_SUB_DOMAIN(domain, P_PHASE);  // Get primary phase domain
+    Domain *sDomain = DOMAIN_SUB_DOMAIN(domain, S_PHASE);  // Get secondary phase domain
+    real xc[ND_ND], y, x;
+
+    /* === Initialize Volume Fraction for Primary Phase === */
+    mp_thread_loop_c(t, domain, pt)
+    {
+        if (FLUID_THREAD_P(t))
+        {
+            Thread *tp = pt[P_PHASE];
+
+            begin_c_loop(c, t)
+            {
+                C_CENTROID(xc, c, t); // Get cell centroid
+                x = xc[0];
+                y = xc[1];
+
+                /* Define a wave-based initial condition for phase distribution */
+                if (y < 0.00292 + 0.0006 * cos(6.283 * x / 0.0778))
+                    C_VOF(c, tp) = 1;  // Liquid phase
+                else
+                    C_VOF(c, tp) = 0;  // Gas phase
+            }
+            end_c_loop(c, t)
+        }
+    }
+
+    /* === Initialize Volume Fraction for Secondary Phase === */
+    mp_thread_loop_c(t, domain, st)
+    {
+        if (FLUID_THREAD_P(t))
+        {
+            Thread *sp = st[S_PHASE];
+
+            begin_c_loop(c, t)
+            {
+                C_CENTROID(xc, c, t);
+                x = xc[0];
+                y = xc[1];
+
+                /* Define complementary wave-based initial condition */
+                if (y < 0.00292 + 0.0006 * cos(6.283 * x / 0.0778))
+                    C_VOF(c, sp) = 0;
+                else
+                    C_VOF(c, sp) = 1;
+            }
+            end_c_loop(c, t)
+        }
     }
 }
